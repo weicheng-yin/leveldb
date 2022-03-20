@@ -218,6 +218,11 @@ inline void SkipList<Key, Comparator>::Iterator::Prev() {
   }
 }
 
+
+
+
+
+// evan
 template <typename Key, class Comparator>
 inline void SkipList<Key, Comparator>::Iterator::Seek(const Key& target) {
   node_ = list_->FindGreaterOrEqual(target, nullptr);
@@ -225,16 +230,23 @@ inline void SkipList<Key, Comparator>::Iterator::Seek(const Key& target) {
 
 template <typename Key, class Comparator>
 inline void SkipList<Key, Comparator>::Iterator::SeekToFirst() {
+  // 第 0 層的第一個 node
   node_ = list_->head_->Next(0);
 }
 
 template <typename Key, class Comparator>
 inline void SkipList<Key, Comparator>::Iterator::SeekToLast() {
+  // 由上往下找，很快就會收斂到最後一個 node 了
   node_ = list_->FindLast();
   if (node_ == list_->head_) {
     node_ = nullptr;
   }
 }
+
+
+
+
+
 
 template <typename Key, class Comparator>
 int SkipList<Key, Comparator>::RandomHeight() {
@@ -255,28 +267,43 @@ bool SkipList<Key, Comparator>::KeyIsAfterNode(const Key& key, Node* n) const {
   return (n != nullptr) && (compare_(n->key, key) < 0);
 }
 
+
+
+
+
+// evan
 template <typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node*
 SkipList<Key, Comparator>::FindGreaterOrEqual(const Key& key,
                                               Node** prev) const {
+  // list 開頭
   Node* x = head_;
+  // 從最上層開始找要的 key(target)
   int level = GetMaxHeight() - 1;
   while (true) {
+    // 拿 link 到的 next node
     Node* next = x->Next(level);
     if (KeyIsAfterNode(key, next)) {
-      // Keep searching in this list
+      // 發現 target 超過 next node
       x = next;
     } else {
+      // 用 prev 紀錄 jump points (跳轉點)(level + node)
       if (prev != nullptr) prev[level] = x;
       if (level == 0) {
+        // 即 target
         return next;
       } else {
-        // Switch to next list
+        // 下一層
         level--;
       }
     }
   }
 }
+
+
+
+
+
 
 template <typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node*
@@ -299,25 +326,43 @@ SkipList<Key, Comparator>::FindLessThan(const Key& key) const {
   }
 }
 
+
+
+
+
+
+// evan
 template <typename Key, class Comparator>
 typename SkipList<Key, Comparator>::Node* SkipList<Key, Comparator>::FindLast()
     const {
+  // list 開頭
   Node* x = head_;
+  // 從最上層開始找要的 key(target)
   int level = GetMaxHeight() - 1;
   while (true) {
+    // 拿 link 到的 next node
     Node* next = x->Next(level);
     if (next == nullptr) {
+      // 找到最後一個 node
       if (level == 0) {
+        // 找完了
         return x;
       } else {
-        // Switch to next list
+        // 下一層
         level--;
       }
     } else {
+      // 換到 next node
       x = next;
     }
   }
 }
+
+
+
+
+
+
 
 template <typename Key, class Comparator>
 SkipList<Key, Comparator>::SkipList(Comparator cmp, Arena* arena)
@@ -331,39 +376,54 @@ SkipList<Key, Comparator>::SkipList(Comparator cmp, Arena* arena)
   }
 }
 
+
+
+
+
+//evan
 template <typename Key, class Comparator>
 void SkipList<Key, Comparator>::Insert(const Key& key) {
-  // TODO(opt): We can use a barrier-free variant of FindGreaterOrEqual()
-  // here since Insert() is externally synchronized.
+  // jump points (跳轉點)，稍後要更新其 link
   Node* prev[kMaxHeight];
+  // 要插入 new node 的位置（同時保持了順序）
   Node* x = FindGreaterOrEqual(key, prev);
 
-  // Our data structure does not allow duplicate insertion
+  // 禁止插入相同的 key
   assert(x == nullptr || !Equal(key, x->key));
 
+  // 產生隨機的高度（new node 的高度）
   int height = RandomHeight();
+  // 如果超過目前的最大高度
   if (height > GetMaxHeight()) {
+    // jump points 要一起更新高度
     for (int i = GetMaxHeight(); i < height; i++) {
       prev[i] = head_;
     }
-    // It is ok to mutate max_height_ without any synchronization
-    // with concurrent readers.  A concurrent reader that observes
-    // the new value of max_height_ will see either the old value of
-    // new level pointers from head_ (nullptr), or a new value set in
-    // the loop below.  In the former case the reader will
-    // immediately drop to the next level since nullptr sorts after all
-    // keys.  In the latter case the reader will use the new node.
+    // 更新最大高度
     max_height_.store(height, std::memory_order_relaxed);
   }
 
+  // 實例化 node
   x = NewNode(key, height);
+
   for (int i = 0; i < height; i++) {
-    // NoBarrier_SetNext() suffices since we will add a barrier when
-    // we publish a pointer to "x" in prev[i].
+    /*
+      對高度低於 new node 的 jump points 進行操作
+      1. new node 複製 jump points 的 next_ 指標
+      2. jump points 指向 new node
+    */
+    // 保證下面兩行的執行順序
+    // memory_order_relaxed
     x->NoBarrier_SetNext(i, prev[i]->NoBarrier_Next(i));
+    // memory_order_release
     prev[i]->SetNext(i, x);
   }
 }
+
+
+
+
+
 
 template <typename Key, class Comparator>
 bool SkipList<Key, Comparator>::Contains(const Key& key) const {
