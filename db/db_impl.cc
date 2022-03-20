@@ -44,11 +44,11 @@ struct DBImpl::Writer {
   explicit Writer(port::Mutex* mu)
       : batch(nullptr), sync(false), done(false), cv(mu) {}
 
-  Status status;
-  WriteBatch* batch;
-  bool sync;
-  bool done;
-  port::CondVar cv;
+  Status status;  // 執行結果
+  WriteBatch* batch;  // 要更新的 data (1~n 個 key-val )
+  bool sync;  // 是否 flush，WriteOptions.sync
+  bool done;  // 執行完畢？
+  port::CondVar cv;  // concurrency control 相關
 };
 
 struct DBImpl::CompactionState {
@@ -1126,6 +1126,63 @@ int64_t DBImpl::TEST_MaxNextLevelOverlappingBytes() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 // Evan
 // input:
 //      options: 包括 verify_checksums, fill_cache, snapshot
@@ -1135,7 +1192,7 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
   // 搜尋狀態(e.g. ok)
   Status s;
-  // 創建鎖，concurrency control
+  // 領鎖，concurrency control
   MutexLock l(&mutex_);
   // snapshot: levelDB 對每一次 write key-val 都會給予一個 sequence_number
   SequenceNumber snapshot;
@@ -1211,6 +1268,61 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 Iterator* DBImpl::NewIterator(const ReadOptions& options) {
   SequenceNumber latest_snapshot;
   uint32_t seed;
@@ -1249,48 +1361,146 @@ Status DBImpl::Delete(const WriteOptions& options, const Slice& key) {
   return DB::Delete(options, key);
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// input:
+//      options: 只有 sync
+//      updates: 多個 key-val
 Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
+  /*
+    Writer:
+      Status status;  // 執行結果
+      WriteBatch* batch;  // 要更新的 data (1~n 個 key-val )
+      bool sync;  // 是否每次寫完都要將 log flush 到 disk
+      bool done;  // 執行完畢？
+      port::CondVar cv;  // concurrency control 相關
+  */
   Writer w(&mutex_);
   w.batch = updates;
   w.sync = options.sync;
   w.done = false;
 
+  // 領鎖，concurrency control
   MutexLock l(&mutex_);
+  // 排隊
   writers_.push_back(&w);
+  // 可能已經被其他 process 完成寫入，或者輪到他自己(隊長)，以上兩者情況就不用排隊了
   while (!w.done && &w != writers_.front()) {
     w.cv.Wait();
   }
+  // 被其他 process 完成寫入
   if (w.done) {
     return w.status;
   }
 
   // May temporarily unlock and wait.
+  // 檢查 level-0 的文件數量是否超過限制？ 或 MemTable 是否寫滿需要切換成新的？
   Status status = MakeRoomForWrite(updates == nullptr);
   uint64_t last_sequence = versions_->LastSequence();
   Writer* last_writer = &w;
+
   if (status.ok() && updates != nullptr) {  // nullptr batch is for compactions
+    // 從隊長開始，將連續多個條件符合的 writer 合併到 tmp_batch_
     WriteBatch* write_batch = BuildBatchGroup(&last_writer);
+
+    // 新增 snapshot (sequence_number)， read 時會用到
     WriteBatchInternal::SetSequence(write_batch, last_sequence + 1);
     last_sequence += WriteBatchInternal::Count(write_batch);
 
-    // Add to log and apply to memtable.  We can release the lock
-    // during this phase since &w is currently responsible for logging
-    // and protects against concurrent loggers and concurrent writes
-    // into mem_.
     {
+      // 解鎖，但保證同一時刻只有一個 process 會執行寫入操作
       mutex_.Unlock();
+      // 先寫 log
       status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
       bool sync_error = false;
+      // 根據 input 的 options 決定要不要 sync log
       if (status.ok() && options.sync) {
         status = logfile_->Sync();
         if (!status.ok()) {
           sync_error = true;
         }
       }
+
       if (status.ok()) {
+        // 寫 MemTable (key-val)
         status = WriteBatchInternal::InsertInto(write_batch, mem_);
       }
+
+      // 上鎖
       mutex_.Lock();
+
+      // 一旦 sync 失敗，所有寫入都必須取消
       if (sync_error) {
         // The state of the log file is indeterminate: the log record we
         // just added may or may not show up when the DB is re-opened.
@@ -1298,11 +1508,15 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
         RecordBackgroundError(status);
       }
     }
+
+    // 清除 tmp_batch_
     if (write_batch == tmp_batch_) tmp_batch_->Clear();
 
+    // 更新 LastSequence
     versions_->SetLastSequence(last_sequence);
   }
 
+  // 通知 所有data已經被寫入的 process
   while (true) {
     Writer* ready = writers_.front();
     writers_.pop_front();
@@ -1314,13 +1528,73 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
     if (ready == last_writer) break;
   }
 
-  // Notify new head of write queue
+  // 通知還在排隊的 process
   if (!writers_.empty()) {
     writers_.front()->cv.Signal();
   }
 
   return status;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // REQUIRES: Writer list must be non-empty
 // REQUIRES: First writer must have a non-null batch
